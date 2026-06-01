@@ -31,13 +31,15 @@ app.post("/sendemail", async (req, res) => {
     if (!msg || !Array.isArray(emailList))
       return res.status(400).json({ success: false, message: "Invalid data" });
 
-    const validEmails = emailList.filter(isValidEmail);
+    const validEmails = emailList.map(String).map((email) => email.trim()).filter(isValidEmail);
     if (validEmails.length === 0)
       return res.status(400).json({ success: false, message: "No valid emails" });
 
     const data = await Credential.findOne().sort({ _id: -1 });
     if (!data)
       return res.status(400).json({ success: false, message: "No email credentials" });
+    if (!data.user || !data.pass)
+      return res.status(400).json({ success: false, message: "Email credential user/pass is missing" });
 
     // nodemailer transporter
     const transporter = nodemailer.createTransport({
@@ -48,8 +50,18 @@ app.post("/sendemail", async (req, res) => {
       },
     });
 
-    await transporter.verify();
+    try {
+      await transporter.verify();
+    } catch (error) {
+      console.error("❌ SMTP Verify Error:", error.message);
+      return res.status(502).json({
+        success: false,
+        message: "SMTP verification failed. Check Gmail address/app password in MongoDB credentials.",
+        error: error.message,
+      });
+    }
 
+    const failedEmails = [];
     for (const email of validEmails) {
       try {
         await transporter.sendMail({
@@ -62,13 +74,27 @@ app.post("/sendemail", async (req, res) => {
         await new Promise((res) => setTimeout(res, 1000));
       } catch (err) {
         console.error("❌ Failed to send:", email, err.message);
+        failedEmails.push({ email, error: err.message });
       }
     }
 
-    res.json({ success: true, message: "Emails sent (check logs for failures)" });
+    if (failedEmails.length === validEmails.length) {
+      return res.status(502).json({
+        success: false,
+        message: "All emails failed to send. Check SMTP credentials and sender limits.",
+        failedEmails,
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Emails processed",
+      sentCount: validEmails.length - failedEmails.length,
+      failedEmails,
+    });
   } catch (error) {
     console.error("❌ Email Error:", error);
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ success: false, message: "Server error while sending email", error: error.message });
   }
 });
 
